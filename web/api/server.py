@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import os
 import time
@@ -6,20 +7,20 @@ from datetime import datetime, timedelta
 from threading import Thread
 
 import aiofiles
-from hivemind_exp.chain_utils import ModalSwarmCoordinator, setup_web3
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, Response, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-import json
+from pythonjsonlogger import jsonlogger
 
+from hivemind_exp.chain_utils import ModalSwarmCoordinator, setup_web3
 from hivemind_exp.dht_utils import *
 from hivemind_exp.name_utils import *
 
 from . import global_dht
+from .dht_pub import GossipDHTPublisher, RewardsDHTPublisher
 from .kinesis import Kinesis
-from .dht_pub import RewardsDHTPublisher, GossipDHTPublisher
 
 # UI is served from the filesystem
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -36,11 +37,27 @@ async def load_index_html():
             index_html = await f.read()
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
+class CustomJsonFormatter(jsonlogger.JsonFormatter):
+    def add_fields(self, log_record, record, message):
+        # Ensure that 'extra' fields are included in the log record
+        super().add_fields(log_record, record, message)
 
+        # Include both adapter extra fields and log call extra fields
+        if hasattr(record, "extra_fields"):
+            for key, value in record.extra_fields.items():
+                log_record[key] = value
+
+
+json_formatter = CustomJsonFormatter("%(asctime)s %(levelname)s %(message)s")
+
+# Configure the root logger
+root_logger = logging.getLogger()
+handler = logging.StreamHandler()
+handler.setFormatter(json_formatter)
+root_logger.addHandler(handler)
+root_logger.setLevel(logging.INFO)
+
+# Get the module logger
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
@@ -144,13 +161,14 @@ def get_rewards_history():
 
 @app.get("/api/name-to-id")
 def get_id_from_name(name: str = Query("")):
-	leaderboard = global_dht.dht_cache.get_leaderboard()
-	leader_ids = [leader["id"] for leader in leaderboard["leaders"]] or []
+    leaderboard = global_dht.dht_cache.get_leaderboard()
+    leader_ids = [leader["id"] for leader in leaderboard["leaders"]] or []
 
-	peer_id = search_peer_ids_for_name(leader_ids, name)
-	return {
-		"id": peer_id,
-	}
+    peer_id = search_peer_ids_for_name(leader_ids, name)
+    return {
+        "id": peer_id,
+    }
+
 
 @app.post("/api/id-to-name")
 async def id_to_name(request: Request):
@@ -158,8 +176,7 @@ async def id_to_name(request: Request):
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > 100 * 1024:  # 100KB in bytes
         raise HTTPException(
-            status_code=413,
-            detail="Request body too large. Maximum size is 100KB."
+            status_code=413, detail="Request body too large. Maximum size is 100KB."
         )
 
     # Parse request body
@@ -167,25 +184,17 @@ async def id_to_name(request: Request):
         body = await request.json()
         if not isinstance(body, list):
             raise HTTPException(
-                status_code=400,
-                detail="Request body must be a list of peer IDs"
+                status_code=400, detail="Request body must be a list of peer IDs"
             )
     except json.JSONDecodeError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid JSON: {str(e)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
     except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid request body: {str(e)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid request body: {str(e)}")
 
     # Validate input size
     if len(body) > 1000:  # Limit number of IDs that can be processed
         raise HTTPException(
-            status_code=400,
-            detail="Too many peer IDs. Maximum is 1000."
+            status_code=400, detail="Too many peer IDs. Maximum is 1000."
         )
 
     # Process each ID
@@ -199,6 +208,7 @@ async def id_to_name(request: Request):
             logger.error(f"Error looking up name for peer ID {peer_id}: {str(e)}")
 
     return id_to_name_map
+
 
 @app.get("/api/gossip")
 def get_gossip():
@@ -276,7 +286,9 @@ def populate_cache():
 
 
 def main(args):
-    coordinator = ModalSwarmCoordinator("", web3=setup_web3()) # Only allows contract calls
+    coordinator = ModalSwarmCoordinator(
+        "", web3=setup_web3()
+    )  # Only allows contract calls
     initial_peers = coordinator.get_bootnodes()
 
     # Supplied with the bootstrap node, the client will have access to the DHT.
@@ -297,6 +309,7 @@ def main(args):
         dht=global_dht.dht,
         kinesis_client=kinesis_client,
         logger=logger,
+        coordinator=coordinator,
         poll_interval_seconds=300,  # 5 minute
     )
     rewards_publisher.start()
@@ -306,6 +319,7 @@ def main(args):
         dht=global_dht.dht,
         kinesis_client=kinesis_client,
         logger=logger,
+        coordinator=coordinator,
         poll_interval_seconds=150,  # 2.5 minute
     )
     gossip_publisher.start()

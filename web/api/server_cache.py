@@ -1,15 +1,20 @@
-from collections import defaultdict
 import hashlib
 import itertools
-from datetime import datetime, timezone
 import random
-import os
-from .gossip_utils import *
+from collections import defaultdict
+from datetime import datetime, timezone
 
 from hivemind_exp.dht_utils import *
 from hivemind_exp.name_utils import get_name_from_peer_id
+
+from .gossip_utils import *
 from .gossip_utils import stage1_message, stage2_message, stage3_message
-from .kinesis import GossipMessage, GossipMessageData, RewardsMessage, RewardsMessageData
+from .kinesis import (
+    GossipMessage,
+    GossipMessageData,
+    RewardsMessage,
+    RewardsMessageData,
+)
 
 
 class Cache:
@@ -25,7 +30,7 @@ class Cache:
 
     def reset(self):
         self.leaderboard = self.manager.dict()
-        self.leaderboard_v2 = self.manager.dict() # Cumulative rewards leaderboard.
+        self.leaderboard_v2 = self.manager.dict()  # Cumulative rewards leaderboard.
 
         self.rewards_history = self.manager.dict()
         self.gossips = self.manager.dict()
@@ -92,11 +97,14 @@ class Cache:
         # Basically a proxy for the reachable peer group.
         curr_round = self.current_round.value
         curr_stage = self.current_stage.value
-        return self._get_dht_value(key=rewards_key(curr_round, curr_stage))
+        return self._get_dht_value(
+            key=rewards_key(curr_round, curr_stage), beam_size=500
+        )
 
     def _previous_rewards(self):
-        return self._get_dht_value(key=rewards_key(*self._previous_round_and_stage()))
-
+        return self._get_dht_value(
+            key=rewards_key(*self._previous_round_and_stage()), beam_size=500
+        )
 
     def _get_leaderboard_v2(self):
         try:
@@ -113,7 +121,9 @@ class Cache:
                     self.leaderboard_v2 = {"leaders": []}
 
                 # Create a map of existing entries for easy lookup
-                existing_entries = {entry["id"]: entry for entry in self.leaderboard_v2["leaders"]}
+                existing_entries = {
+                    entry["id"]: entry for entry in self.leaderboard_v2["leaders"]
+                }
 
                 # Process each peer's rewards
                 current_time = int(datetime.now().timestamp())
@@ -127,17 +137,24 @@ class Cache:
                             "recordedStage": curr_stage,
                             "cumulativeScore": float(score),  # Initial score
                             "lastScore": float(score),  # Track last score
-                            "scoreHistory": [{"x": current_time, "y": float(score)}]  # Initialize history with first point
+                            "scoreHistory": [
+                                {"x": current_time, "y": float(score)}
+                            ],  # Initialize history with first point
                         }
                     else:
                         entry = existing_entries[peer_id]
                         # Same round/stage - just update current score
-                        if (entry["recordedRound"] == curr_round and
-                            entry["recordedStage"] == curr_stage):
+                        if (
+                            entry["recordedRound"] == curr_round
+                            and entry["recordedStage"] == curr_stage
+                        ):
                             entry["cumulativeScore"] = float(score)
                             entry["lastScore"] = float(score)  # Update last score
                             # Update history, keeping last 30 points
-                            entry["scoreHistory"] = (entry["scoreHistory"] + [{"x": current_time, "y": float(score)}])[-30:]
+                            entry["scoreHistory"] = (
+                                entry["scoreHistory"]
+                                + [{"x": current_time, "y": float(score)}]
+                            )[-30:]
                         # Different round/stage - add to cumulative
                         else:
                             entry["cumulativeScore"] += float(score)
@@ -145,30 +162,41 @@ class Cache:
                             entry["recordedRound"] = curr_round
                             entry["recordedStage"] = curr_stage
                             # Add new score to history, keeping last 30 points
-                            entry["scoreHistory"] = (entry["scoreHistory"] + [{"x": current_time, "y": entry["cumulativeScore"]}])[-30:]
+                            entry["scoreHistory"] = (
+                                entry["scoreHistory"]
+                                + [{"x": current_time, "y": entry["cumulativeScore"]}]
+                            )[-30:]
 
                 # Remove entries that are not in the current or previous round/stage.
                 prev_round, prev_stage = self._previous_round_and_stage()
                 current_entries = {}
                 for peer_id, entry in existing_entries.items():
-                    in_current = (entry["recordedRound"] == curr_round and entry["recordedStage"] == curr_stage)
-                    in_prev = (entry["recordedRound"] == prev_round and entry["recordedStage"] == prev_stage)
+                    in_current = (
+                        entry["recordedRound"] == curr_round
+                        and entry["recordedStage"] == curr_stage
+                    )
+                    in_prev = (
+                        entry["recordedRound"] == prev_round
+                        and entry["recordedStage"] == prev_stage
+                    )
                     if in_current or in_prev:
                         current_entries[peer_id] = entry
                     else:
-                        self.logger.info(f"removing entry for peer {peer_id} because it is not in the current or previous round/stage")
+                        self.logger.info(
+                            f"removing entry for peer {peer_id} because it is not in the current or previous round/stage"
+                        )
 
                 # Convert back to sorted list
                 sorted_leaders = sorted(
                     current_entries.values(),
                     key=lambda x: (x["cumulativeScore"], x["id"]),
-                    reverse=True
+                    reverse=True,
                 )
 
                 # Update leaderboard_v2
                 self.leaderboard_v2 = {
                     "leaders": sorted_leaders,
-                    "total": len(sorted_leaders)
+                    "total": len(sorted_leaders),
                 }
 
                 # Convert to RewardsMessage format and send to Kinesis
@@ -179,15 +207,14 @@ class Cache:
         except Exception as e:
             self.logger.warning("could not get leaderboard data: %s", e)
             return None
-            
 
     # Sends the rewards data to a Kinesis stream where it can be processed by the UI server.
     def _send_rewards_to_kinesis(self, leaders, round, stage):
         """Convert leaderboard data to RewardsMessage format and send to Kinesis"""
         try:
-            current_time = datetime.now(timezone.utc)  
+            current_time = datetime.now(timezone.utc)
             rewards_data = []
-            
+
             for leader in leaders:
                 rewards_data.append(
                     RewardsMessageData(
@@ -196,13 +223,13 @@ class Cache:
                         amount=leader["cumulativeScore"],
                         round=round,
                         stage=stage,
-                        timestamp=current_time
+                        timestamp=current_time,
                     )
                 )
-                
+
             rewards_message = RewardsMessage(type="rewards", data=rewards_data)
             self.kinesis_client.put_rewards(rewards_message)
-            
+
         except Exception as e:
             self.logger.error(f"!!! Failed to send rewards to Kinesis: {e}")
 
@@ -213,23 +240,22 @@ class Cache:
             for ts, gossip in gossips:  # ts is a float timestamp
                 # Convert float timestamp to UTC datetime
                 dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                    
+
                 gossip_data.append(
                     GossipMessageData(
                         id=gossip["id"],
                         peerId=gossip["nodeId"],
                         peerName=gossip["node"],
                         message=gossip["message"],
-                        timestamp=dt  # Use the converted UTC datetime
+                        timestamp=dt,  # Use the converted UTC datetime
                     )
                 )
 
             gossip_message = GossipMessage(type="gossip", data=gossip_data)
             self.kinesis_client.put_gossip(gossip_message)
-            
+
         except Exception as e:
             self.logger.error(f"!!! Failed to send gossip to Kinesis: {e}")
-                
 
     def _get_leaderboard(self):
         try:
@@ -251,7 +277,7 @@ class Cache:
                 }
                 for t in raw
             ]
-            self.logger.info(">>> lb_entries length: %d", len(all_entries))
+            self.logger.info("lb_entries length: %d", len(all_entries))
 
             current_history = []
             with self.lock:
@@ -266,12 +292,6 @@ class Cache:
                         + [{"x": int(datetime.now().timestamp()), "y": latestScore}][
                             -100:
                         ]
-                    )
-                    self.logger.info(
-                        ">>> id: %s, past_scores length: %d, next_scores length: %d",
-                        id,
-                        len(past_scores),
-                        len(next_scores),
                     )
                     self.rewards_history[id] = next_scores
                     current_history.append(
@@ -334,13 +354,15 @@ class Cache:
                     sorted_outputs = sorted(
                         list(outputs.items()), key=lambda t: t[1][0]
                     )
-                    for question, (ts, outputs) in sorted_outputs:
+                    for q_hash, (ts, outputs) in sorted_outputs:
+                        # Generate a unique-ish ID for each message
                         gossip_id = hashlib.md5(
-                            f"{node_key}_{r}_{s}_{question}".encode()
+                            f"{node_key}_{r}_{s}_{q_hash}".encode()
                         ).hexdigest()
+
                         if s < len(STAGE_MESSAGE_FNS):
                             message = STAGE_MESSAGE_FNS[s](
-                                node_key, question, ts, outputs
+                                node_key, outputs["question"], ts, outputs
                             )
                         else:
                             message = f"Cannot render output for unknown stage {s}"
@@ -364,7 +386,7 @@ class Cache:
         finally:
             elapsed = (datetime.now() - start_time).total_seconds()
             self.logger.info(
-                ">>> completed gossip with %d messages in %.2fs",
+                "completed gossip with %d messages in %.2fs",
                 len(round_gossip),
                 elapsed,
             )
